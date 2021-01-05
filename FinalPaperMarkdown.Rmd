@@ -21,8 +21,8 @@ library(lubridate)
 library(urca) # unit root testing
 library(forecast)
 library(vars)
-census_api_key('5b83bc6e9aae994e78c6f94dfb495b47f45321e7') # Census Key
-fredr::fredr_set_key('e41b96ade0af0e27f02d045d83f32b21') # Fred API Key
+census_api_key('...') # Census Key (Redacted)
+fredr::fredr_set_key('...') # Fred API Key (Redacted)
 
 
 # Setup --------------------------------------------------------------------------------
