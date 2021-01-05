@@ -1,0 +1,506 @@
+---
+title: "Does the Poverty Growth Inequality Triangle Hold in the United States?"
+author: "Amar Adusumilli"
+date: 2020-12-06
+output: pdf_document
+fontsize: 12pt
+
+abstract: Economic growth is widely postulated as a necessary condition for poverty reduction. However, if income inequality rises alongside economic growth, then the benefits of growth may be distributed in such a way that fails to reduce poverty at a level proportional to the growth. Former World Bank Chief Economic François Bourguignon summarized this relationship with his 'Poverty-Growth-Inequality Triangle' hypothesis, which suggests that a country's change in poverty is determined by its change in income growth and income inequality. Note that poverty in this paper refers to US Census Bureau's definition, which is defined based on a given family's total income, before taxes, equaling less than said family's threshold, where the threshold is set based on family size and number of children under 18. The existing research concerning the interaction of poverty and growth has shown that economic growth serves to reduce poverty. However, much of this research pertains to developing economies and utilizes panel datasets, rather than time series. My contribution to the literature is thus to test whether Bourguignon's Triangle hypothesis holds in the United States, using a vector autoregressive (VAR) framework. I find no evidence to support the triangle hypothesis in the United States. 
+---
+|     <font size = "2"> *Keywords*: Poverty-Inequality-Growth Triangle, Development Economics </font> 
+
+|     <font size = "2"> *JEL Codes*: I3, F63, O1  </font>
+
+
+
+```{r setup, echo = FALSE, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = TRUE, warning = FALSE, error = FALSE, message = FALSE)
+library(tidyverse)
+library(tidycensus)
+library(lubridate)
+library(urca) # unit root testing
+library(forecast)
+library(vars)
+census_api_key('5b83bc6e9aae994e78c6f94dfb495b47f45321e7') # Census Key
+fredr::fredr_set_key('e41b96ade0af0e27f02d045d83f32b21') # Fred API Key
+
+
+# Setup --------------------------------------------------------------------------------
+# Load Data
+# Poverty Data
+Poverty_Data <- readxl::read_excel(
+  'C:\\Users\\aadus\\OneDrive\\Documents\\GW\\Fall 2020\\Time Series Econometrics\\Paper\\PovertyTable_US.xlsx', 
+  skip = 3)
+
+# Define the 'date' column as an actual date object
+Poverty_Data$date <- rev(seq(as.Date('1959-01-01'), as.Date('2019-01-01'), by = 'year'))
+
+
+
+# GDP per Capita
+GDP_Data <- fredr::fredr(
+  series_id = 'A939RX0Q048SBEA',
+  observation_start = as.Date('1967-01-01'),
+  observation_end = as.Date('2019-01-01')) %>% 
+  dplyr::select(-series_id) %>% 
+  mutate(date = as.Date(date)) %>% 
+  rename(GDP.per.Capita = value)
+# Gini Ratio
+# NOTE: Should I use Gini ratio by household or by family?
+Gini_Data <- fredr::fredr(
+  series_id = 'GINIALLRH') %>% 
+  dplyr::select(-series_id) %>% 
+  mutate(date = as.Date(date)) %>% 
+  rename(Gini.Ratio = value)
+
+# Unemployment - Convert to annaul series by taking the yearly mean
+UNRATE <- fredr::fredr(
+  series_id = 'UNRATE') %>% 
+  dplyr::select(-series_id) %>% 
+  mutate(date = as.Date(date)) %>% 
+  rename(UNRATE = value) %>% 
+  mutate(date = year(date)) %>% 
+  group_by(date) %>% 
+  summarise(UNRATE = mean(UNRATE)) %>% 
+  ungroup() %>% 
+  mutate(date = seq(as.Date('1948-01-01'), as.Date('2020-01-01'), by = 'year'))
+
+
+# Merge Datasets
+TriangleData <- Poverty_Data %>% 
+  inner_join(GDP_Data, by = 'date') %>% 
+  inner_join(Gini_Data, by = 'date') %>% 
+  inner_join(UNRATE, by = 'date') %>% 
+  arrange(date)
+
+# Create TS Objects
+GDP.TS <- ts(TriangleData$GDP.per.Capita, start = c(1967, 1), frequency = 1)
+# Take Log of GDP 
+GDP.TS_Log <- log(GDP.TS)
+# Gini
+Gini.TS <- ts(TriangleData$Gini.Ratio, start = c(1967, 1), frequency = 1)
+# Poverty
+NationalPov.TS <- ts(TriangleData$PovertyRate, start = c(1967, 1), frequency = 1)
+# Unemployment
+UNRATE.TS <- ts(TriangleData$UNRATE, start = c(1967, 1), frequency = 1)
+
+
+# EDA ---------------------------------------------------------------------
+# Time Series Plots:
+# Plot GDP
+GDP.Plot <- ggplot(TriangleData) +
+  geom_line(aes(x = date, y = GDP.per.Capita)) + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = 'Year', y = 'GDP Per Capita',
+       title = 'GDP per Capita Over Time', 
+       caption = 'Source: Federal Reserve Bank of St. Louis') +
+  theme_minimal()
+# Clear Upward Trend
+# Logged GDP
+GDP.Plot_Log <- ggplot(TriangleData) +
+  geom_line(aes(x = date, y = log(GDP.per.Capita))) + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = 'Year', y = 'Log of GDP Per Capita',
+       title = 'Logged GDP per Capita Over Time', 
+       caption = 'Source: Federal Reserve Bank of St. Louis') +
+  theme_minimal()
+
+
+
+# Plot Gini Ratio
+Gini.Plot <- ggplot(TriangleData) +
+  geom_line(aes(x = date, y = Gini.Ratio), color = 'blue') +
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = 'Year', y = 'Gini Ratio',
+       title = 'Gini Ratio Over Time', 
+       caption = 'Source: Federal Reserve Bank of St. Louis') +
+  theme_minimal()
+# Clear Upward Trend
+
+# Plot Poverty
+Poverty.Plot <- ggplot(TriangleData) +
+  geom_line(aes(x = date, y = PovertyRate), color = 'red') + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  labs(x = 'Date', y = 'National Poverty Rate %', 
+       title = 'National Poverty Rate Over Time', caption = 'Source: US Census Bureau') +
+  theme_minimal()
+
+# Plot Unemployment
+UNRATE.Plot <- ggplot(TriangleData) +
+  geom_line(aes(x = date, y = UNRATE), color = 'brown') + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  labs(x = 'Date', y = 'Unemployment Rate %', 
+       title = 'Unemployment Rate Over Time', 
+       caption = 'Source: Federal Reserve Bank of St. Louis') +
+  theme_minimal()
+
+# First Difference Plots
+# Create New Object
+TriangleData.FD <- data.frame(
+  date = TriangleData$date[2:length(TriangleData$date)],
+  GDP.FD = diff(log(TriangleData$GDP.per.Capita)),
+  Gini.FD = diff(TriangleData$Gini.Ratio),
+  Poverty.FD = diff(TriangleData$PovertyRate),
+  UNRATE.FD = diff(TriangleData$UNRATE)
+)
+# GDP
+GDP.FD.Plot <- ggplot(TriangleData.FD) +
+  geom_line(aes(x = date, y = GDP.FD)) + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = 'Year', y = 'Delta rGDP',
+       title = 'Real GDP Per Capita', 
+       caption = 'Source: Federal Reserve Bank of St. Louis') +
+  theme_minimal()
+# Gini
+Gini.FD.Plot <- ggplot(TriangleData.FD) +
+  geom_line(aes(x = date, y = Gini.FD), color = 'blue') + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = 'Year', y = 'Delta Gini',
+       title = 'Gini Ratio', 
+       caption = 'Source: Federal Reserve Bank of St. Louis') +
+  theme_minimal()
+# Poverty
+Poverty.FD.Plot <- ggplot(TriangleData.FD) +
+  geom_line(aes(x = date, y = Poverty.FD), color = 'red') + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = 'Year', y = 'Delta Poverty',
+       title = 'National Poverty Rate', 
+       caption = 'Source: US Census Bureau') +
+  theme_minimal()
+# Unemployment
+UNRATE.FD.Plot <- ggplot(TriangleData.FD) +
+  geom_line(aes(x = date, y = UNRATE.FD), color = 'brown') + 
+  scale_x_date(date_breaks = '10 years', date_labels = '%Y') +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = 'Year', y = 'Delta Unemployment',
+       title = 'Unemployment Rate', 
+       caption = 'Source: Federal Reserve Bank of St. Louis') +
+  theme_minimal()
+
+
+
+# Calculate Summary Statistics
+SummaryStats <- tibble(
+  Series = c('GDP Per Capita', 'Gini Ratio', 'National Poverty Rate %', 'Unemployment Rate %'),
+  Mean = sapply(dplyr::select(TriangleData, 3, 4, 2, 5), mean),
+  `Standard Deviation` = sapply(dplyr::select(TriangleData, 3, 4, 2, 5), sd),
+  Median = sapply(dplyr::select(TriangleData, 3, 4, 2, 5), median),
+  `Interquartile Range` = sapply(dplyr::select(TriangleData, 3, 4, 2, 5), IQR),
+  `Maximum Value` = sapply(dplyr::select(TriangleData, 3, 4, 2, 5), max),
+  `Minimum Value` = sapply(dplyr::select(TriangleData, 3, 4, 2, 5), min)) 
+SummaryStats[, 2:7] <- round(SummaryStats[, 2:7], 2)
+
+# Unit Root: -----------------------------------------------------------------
+
+# Stationarity Testing:
+# Poverty 
+# TS Plots - ACF and PACF
+# ggtsdisplay(Poverty.US.TS)
+# Unit Root Test: ADF
+# summary(ur.df(NationalPov.TS, lags = 4, type = 'trend', selectlags = 'BIC'))
+# We fail to reject the null, all tests 
+# Repeat for none:
+summary(ur.df(NationalPov.TS, lags = 4, type = 'drift', selectlags = 'BIC'))
+
+# Difference
+NationalPov.TS_diff <- diff(NationalPov.TS)
+summary(ur.df(NationalPov.TS_diff, lags = 4, type = 'none', selectlags = 'BIC'))
+# Reject null after first differencing
+# Kpss Test:
+summary(ur.kpss(NationalPov.TS, lags = 'short', type = 'mu'))
+summary(ur.kpss(diff(NationalPov.TS), lags = 'short', type = 'mu'))
+# We fail to reject the null of stationarity
+# After first differencing, we still fail to reject
+# Total US appears stationary from these results: d = 1, (both tests align after first difference)
+
+
+# GDP
+# TS Plots - ACF and PACF
+# ggtsdisplay(GDP.TS)
+# Clearly Nonstationary - visible trend and slow decaying ACF
+summary(ur.df(GDP.TS_Log, type = 'trend', lags = 4, selectlags = 'BIC'))
+# ADF Test confirms as such. Reject null that random walk is 'true' model, 
+# Fail to reject unit root
+summary(ur.kpss(GDP.TS, type = 'tau', lags = 'short'))
+# Does differencing remove the unit root?
+GDP.TS_diff <- diff(GDP.TS_Log)
+# TS Plots - Differenced GDP Data
+# ggtsdisplay(GDP.TS_diff)
+# Still unclear - we see a huge drop around the 2008 recession
+# ADF:
+summary(ur.df(GDP.TS_diff, type = 'none', lags = 4, selectlags = 'BIC'))
+# Series is stationary - we reject the null of unit root at 1% level
+# Reject null of random walk vs random walk + trend + drift
+# KPSS:
+summary(ur.kpss(GDP.TS_diff, type = 'mu', lags = 'short'))
+# Therefore - Order of integration is 1, but questions about how to handle trend (decomposition?)
+
+# Gini Ratio:
+# TS Plots
+# ggtsdisplay(Gini.TS)
+# Similar to GDP, clearly nonstationary
+summary(ur.df(Gini.TS, type = 'trend', lags = 4, selectlags = 'BIC')) # fail to reject 
+summary(ur.kpss(Gini.TS, lags = 'short', type = 'tau'))
+# Take First Differences
+Gini.TS_diff <- diff(Gini.TS)
+# ggtsdisplay(Gini.TS_diff)
+# Appears stationary from the graph, with no trend. Will test:
+# ADF:
+summary(ur.df(Gini.TS_diff, type = 'none', lags = 4, selectlags = 'BIC'))
+# Reject the Null of Unit Root at 1%
+# KPSS:
+summary(ur.kpss(Gini.TS_diff, lags = 'short'))
+# Fail to reject the null of stationarity
+# Therefore, D = 1
+
+
+# Unemployment
+summary(ur.df(UNRATE.TS, type = 'drift', lags = 4, selectlags = 'BIC'))
+summary(ur.df(diff(UNRATE.TS), type = 'none', lags = 4, selectlags = 'BIC'))
+summary(ur.kpss(UNRATE.TS, type = 'mu', lags = 'short'))
+summary(ur.kpss(diff(UNRATE.TS), type = 'mu', lags = 'short'))
+# Order of Integration is 0
+
+# Summarize Results in a Table:
+Stationary.Results <- tibble(
+  Series = c('National Poverty Rate', 'GDP Per Capita', 'Gini Ratio', 'Unem. Rate'),
+  `ADF Statistic` = c(-2.87, -2.275, -1.62, -3.37), 
+  `ADF CV-T1` = c(-2.89, -3.45, -3.45, -2.89),
+  `ADF Stat-FD` = c(-3.72, -3.24, -5.32, -5.22),
+  `ADF CV-T2` = c(-1.95, -1.95, -1.95, -1.95),
+  `KPSS Statistic` = c(0.128, 0.232, 0.171, 0.10),
+  `KPSS CV-T1` = c(0.463, 0.146, 0.146, 0.463),
+  `KPSS Stat-FD` = c(0.097, 0.047, 0.120, 0.129),
+  `KPSS CV-T2` = c(0.463, 0.463, 0.463, 0.463),
+  `Order` = c(1, 1, 1, 0)
+)
+
+# Cointegration Testing
+# Select 2 Lags on the basis of the VAR Select below
+# Define Test Object
+CI.Test <- cbind(GDP.TS, Gini.TS, NationalPov.TS)
+# summary(ca.jo(x = CI.Test, type = 'trace', ecdet = 'trend', K = 2))
+# summary(ca.jo(x = CI.Test, type = 'eigen', ecdet = 'trend', K = 2))
+# Fail to reject the Null of R = 0 for both tests - no cointegration
+
+
+# Modeling  ---------------------------------------------------------------
+
+# Create Data for VAR Model
+VAR.Data_US <- cbind(GDP.TS_diff, Gini.TS_diff, NationalPov.TS_diff)
+
+# Alternative - Include Unemployment Rate as first differences
+VAR.Data_Alt <- cbind(GDP.TS_diff, Gini.TS_diff, NationalPov.TS_diff, UNRATE.TS[2:length(UNRATE.TS)])
+# With First Difference Unemployment
+VAR.Data_Alt.FD <- cbind(GDP.TS_diff, Gini.TS_diff, NationalPov.TS_diff, diff(UNRATE.TS))
+# What Lag Order Should We Use?
+VARselect(VAR.Data_US, exogen = UNRATE.TS[2:length(UNRATE.TS)]) 
+# Differing Results - BIC is optimizing for lag length of 1, AIC for 2
+# Will test between lag length of 1 and 2
+# Exogenous Unemployment
+VAR_Exog.1 <- VAR(VAR.Data_US, p = 1, exogen = UNRATE.TS[2:length(UNRATE.TS)], type = 'none')
+VAR_Exog.2 <- VAR(VAR.Data_US, p = 2, exogen = UNRATE.TS[2:length(UNRATE.TS)], type = 'none')
+# First Differenced, Exogenous Unemployment
+VAR_Exog.1FD <- VAR(VAR.Data_US, p = 1, exogen = diff(UNRATE.TS), type = 'none')
+VAR_Exog.2FD <- VAR(VAR.Data_US, p = 2, exogen = diff(UNRATE.TS), type = 'none')
+# Endogenous Unemployment
+VAR_Endog.1 <- VAR(VAR.Data_Alt, p = 1, type = 'none')
+VAR_Endog.2 <- VAR(VAR.Data_Alt, p = 2, type = 'none')
+# First Differenced, Endogenous Unemployment
+VAR_Endog.1FD <- VAR(VAR.Data_Alt.FD, p = 1, type = 'none')
+VAR_Endog.2FD <- VAR(VAR.Data_Alt.FD, p = 2, type = 'none')
+# Collect Models in a List
+ModelList <- list(VAR_Exog.1, VAR_Exog.2, VAR_Exog.1FD, VAR_Exog.2FD, VAR_Endog.1,
+                  VAR_Endog.2, VAR_Endog.1FD, VAR_Endog.2FD)
+
+# Specifications
+VAR.Specification <- tibble(
+  Unemployment = c('Exogenous', 'Exogenous', 'Exogenous, First Differenced', 
+                   'Exogenous, First Differenced',
+                   'Endogenous', 'Endogenous',
+                   'Endogenous, First Differenced',
+                   'Endogenous, First Differenced'),
+  `Lag Order` = c(1, 2, 1, 2, 1, 2, 1, 2),
+  AIC = sapply(ModelList, AIC),
+  BIC = sapply(ModelList, BIC),
+  `Log Likelihood` = sapply(ModelList, logLik))
+# VAR_Exog.1FD is the best model (Exogenous Unemployment in First Differences, p = 1)
+    
+# Is the system well specified?
+roots(VAR_Exog.1FD, modulus = TRUE)
+
+# Coefficient Estimates (Recreate the Summary Output)
+# Extract to table
+VAR.Results <- broom::tidy(VAR_Exog.1FD$varresult$NationalPov.TS_diff)
+VAR.Summary <- tibble(
+  Variable = c('Delta rGDP per Capita - 1st Lag', 'Delta Gini Ratio - 1st Lag', 
+               'Delta Poverty - 1st Lag', 'Delta Unemployment (Exog) - 1st Lag'),
+  Estimate = c(VAR.Results$estimate),
+  `Standard Error` = c(VAR.Results$std.error),
+  `T-Statistic` = c(VAR.Results$statistic),
+  `P-Value` = c(VAR.Results$p.value)
+)
+# Round Results
+VAR.Summary[, 2:5] = round(VAR.Summary[, 2:5], 3)
+
+# Check Residuals
+SerialCorr.Resid <- serial.test(VAR_Exog.1FD, lags.pt = 12, type = "BG")
+# P value of 0.7166, no autocorrelation
+# Arch Test (Homoscedasticity)
+Triangle.Arch <- arch.test(VAR_Exog.1FD, lags.multi = 12, multivariate.only = TRUE)
+# P-value of 1, no heteroscedasticity
+
+
+# Granger Causality
+# Does rGDP and Gini granger cause Poverty?
+causality(VAR_Exog.1FD, cause = c('GDP.TS_diff', 'Gini.TS_diff'))
+# Fail to reject, no granger causality
+```
+
+\newpage
+
+
+## Introduction
+
+In the interval spanning from 2010 to 2019, real Gross Domestic Product (GDP) per capita in the United States increased from \$49,303 to \$57,789, a relative change of approximately 17.2%. Across the same time interval, the national poverty rate dropped from 15.1% to 10.5%. From an aggregate perspective, these figures suggest significant progress with regards to the economic health of the nation. However, substantial debate persists concerning the extent to which economic growth reduces poverty (Adams, 2003). Intuitively, we can surmise that poverty rates are highly influenced by the state of the economy. Economic growth brings forth opportunities for employment and income growth, which contribute to socioeconomic mobility. Indeed, in their 2001 paper ‘Macroeconomic Policy and Poverty Reduction’ jointly published by the International Monetary Fund and the World Bank, authors Brian Ames, Ward Brown, Shanta Devarajan, and Alejandro Izquierdo posited that economic growth is the ‘single most important factor influencing poverty'. One argument against this proposition is put forth by the Kuznets curve hypothesis, proposed by economist Simon Kuznets in 1955. The Kuznets curve suggests that as income grows in the initial phases of development, the skew in the distribution of income rises, resulting in greater income inequality, before finally decreasing as a larger proportion of individuals participate in activities beget by rising national income (Adams, 2003). In this scenario, the initial effect of economic growth on poverty is limited, as rising income inequality results in the upper quartiles of the income distribution capturing much of the growth. In other words, if income inequality rises with economic growth, then poverty itself may not decline as a function of economic growth. Former World Bank Chief Economist François Bourguignon codified this thought with the Poverty-Growth-Inequality triangle (hereafter referred to as 'the triangle'), which refers to the idea that a nation's change in poverty can be determined by its change in income growth and income equality (Bourguignon, 2003).
+```{r 1_Triangle, echo = FALSE, fig.cap = "The Poverty-Growth-Inequality Triange, proposed by Francois Bourguignon. Source: By Majora's Macro - Own work, CC BY-SA 4.0, https://commons.wikimedia.org/w/index.php?curid=36519329"}
+knitr::include_graphics('C:\\Users\\aadus\\OneDrive\\Documents\\GW\\Fall 2020\\Time Series Econometrics\\Paper\\Figures\\Poverty-Growth-Inequality_Triangle.png')
+
+```
+Source: By Majora's Macro - Own work, CC BY-SA 4.0, https://commons.wikimedia.org/w/index.php?curid=36519329"
+\hfill\break
+This idea is particularly salient in the United States, where economic inequality has risen since the early 1980’s, and where regional economies vary considerably from one another. A worker today at the 95th percentile of the income distribution earns upwards of three times what the median worker earns, far above the corresponding ratio in past decades (Abel & Deitz, 2019). Thus, the purpose of this paper is to ascertain the effect of economic growth and income inequality on poverty in the United States. In effect, this amounts to testing whether the Poverty-Growth-Inequality triangle holds in the United States. Using a vector autoregressive (VAR) approach, I estimate each variable within the triangle as a function of the other variables' lags. Whether or not the triangle holds in the United States will be evident from the estimation results. 
+
+## Literature Review
+
+A large number of empirical studies have been conducted concerning the interaction of poverty and growth, with others also incorporating income inequality as well. Although many of these studies analyze developing economies and not the United States or other developed economies, insights can still be obtained from their conclusions. One such study is Richard Adams’ 2003 paper on the impact of economic growth on poverty and inequality in 50 developing countries. Adams finds that economic growth reduces poverty specifically because growth does not lead to changes in income inequality, and as such income growth leads to a proportional decline in poverty. A similar study conducted by Harvard Researchers Michael Roemer and Mary Kay Gugerty in 1997 comes to a comparable conclusion, finding that economic growth benefits the poor in almost all cases where such growth has taken place. They find that even in countries where income inequality increased, the positive effects of growth outweighed any negative effects brought on by changes in the income distribution. A more recent 2020 study by Robert Breunig and Omer Majeed concerns the effect of poverty and income inequality on economic growth. Breunig and Majeed find that as poverty increases, the effect of income inequality on economic growth is both negative and statistically significant. Interestingly, they fail to find a significant effect of income inequality on economic growth in the absence of poverty, suggesting that it is the interaction of poverty and income inequality which has harmful effects towards economic growth. This result would appear to support Bourguignon’s triangle hypothesis.  
+\hfill\break
+While these papers provide compelling arguments, their relevance to my study is limited through differences in methodology and scope. The aforementioned papers pertain to developing countries and use panel data methods to obtain their results - they do not employ time series models. In contrast, this paper focuses on data pertaining to the United States and uses a VAR model, rather than fixed effects regression and other panel data methods. One relevant study that uses a VAR model is Adefemi Obalade, Ayooluwade Ebiwonjumi, and Anthony Adaramola's 2019 paper on the dynamics of poverty, unemployment, literacy, and per capita income in Nigeria. The authors find that lagged per capita income has an inverse relationship with poverty, in that increases in past values of per capita income correspond to decreases in poverty. This result echoes what I expect to find in my analysis, given the findings presented in this section. However, the vast differences between the economies of Nigeria and the United States limit the applicability of this study towards my analysis. I was very surprised at the apparent lack of studies which focus on the interaction between poverty, economic inequality, and economic growth in the United States. The absence of studies in this domain underscores the value of the analysis I am conducting here. 
+
+## Data
+
+I use annual time series data spanning the interval from 1967 to 2019 for this analysis. This date interval was selected on the basis of data availability. The poverty data used is published by United States Census Bureau as part of their Historical Poverty Tables, sourced from the Current Population Survey Annual Social and Economic Supplement. The Census Bureau measures poverty based on pretax income, excluding noncash benefits (inclusive of public housing, Medicaid, and food assistance programs) and capital gains, for a given family, and then compares this income against a series of inflation indexed thresholds, which are set according to family size and the number of children under the age of 18. If a family falls below their assigned threshold, then all members of said family are considered to be in poverty. There is some discrepancy between the Census Bureau's definition of poverty and Bourguignon's. Bourguignon measures poverty via the 'absolute poverty headcount index', which he defines as the proportion of the population below a particular 'poverty line', as gathered from household survey data (Bourguignon, 2004). He specifically cites an example of such a poverty line as $1 a day, which is unlikely to apply to a developed economy such as the United States. Clearly, there is a distinction to be made between poverty as it applies to a developing economy and poverty as it applies to the United States. However, the Census Bureau's poverty values satisfy the criteria put forth by Bourguignon's definition. 
+
+I use the Income Gini Ratio for Households as a measure of income inequality. This series is published by the Federal Reserve Bank of St. Louis and was obtained through their 'Fred' data platform. Bourguignon defines 'Inequality' as disparities in relative income across the population, where relative income denotes that the income distribution has been normalized by the population mean. The Gini Ratio is the best available data which represents this. Note that the more prominent Gini Index (Gini Coefficient * 100) for the United States is published by the World Bank and is only measured in 5 year intervals, thereby making it unsuitable for this analysis. In contrast, the Household Gini Ratio is available on an annual basis from 1967 to 2019. Income growth is measured through Real Gross Domestic Product (GDP) per Capita. This series is published by the Federal Reserve Bank of St. Louis and was obtained through their 'Fred' data platform. Similar to the poverty data, there is a discrepancy between the available data and Bourguignon's definition. Bourguignon defines income as the 'percentage change in mean welfare level', and while this does not perfectly describe GDP per capita, the log differences of real GDP per capita should approximate the percentage change in mean welfare level closely. I have also incorporated the national unemployment rate as a control variable, in the hope of reducing omitted variable bias. This data was also obtained through their 'Fred' data platform. I make the assumption that the unemployment rate is exogenous with regards to the triangle variables. Unlike the triangle variables, this series consists of monthly observations rather than annual observations. To represent the series on an annual basis, I have aggregated the dataset by year, with each yearly value being the average of the 12 monthly observations within said year.
+
+```{r fig1, echo = FALSE}
+# Table 1 - Summary Stats
+knitr::kable(SummaryStats, caption = 'Summary Statistics')
+
+```
+
+
+## Methodology and Results
+
+To determine whether the poverty-inequality-growth triangle holds in the United States, I use a vector autoregressive approach to capture the dynamic relationship between the three triangle variables over time. This approach is necessitated by exogeneity concerns. Indeed, exogeneity is impossible to assume for all three variables. An argument can plausibly be made suggesting that the poverty rate is caused by GDP, but the reverse relationship can also be argued. Therefore, we must treat each variable symmetrically. Through this procedure, each variable within the triangle can be estimated as a function of lagged values of the remaining two variables. Whether or not the triangle holds can then be construed from the estimation results and from Granger Causality testing. The latter is particularly important to this analysis. If GDP per Capita and the Gini Ratio do not Granger cause the poverty rate, then the triangle hypothesis is very unlikely to hold in the United States. In order to properly specify the VAR model or decide whether to use a VAR model at all, the order of integration for each series must be identified, as well as whether or not the system is cointegrated. If the system is cointegrated, then the vector error correction model or the cointegrated VAR model may also be used. In the following sections, I conduct stationarity testing to determine the order of integration of each series. I then use the Johansen test for multi-variate cointegration to determine whether the system is cointegrated. These results dictate the modeling procedure used to estimate the triangle system. 
+
+### Stationarity Testing
+
+In determining stationarity, I take the first step of simply plotting the series. A linear trend is clearly present with both logged GDP per Capita, as well as the Gini Ratio over time. Simply from the graph, the nonstationarity of these two variables is evident. The national poverty rate is more ambiguous. The series appears to alternate between a sequence of peaks and troughs, with the peaks almost certainly a direct function of economic recessions, most notably the Recession of 1981-82, as well as the Great Recession towards the end of the 2010s. 
+
+```{r LevelPlot, echo = FALSE}
+# Plot
+TS.Plots <- ggpubr::ggarrange(GDP.Plot_Log, Gini.Plot, Poverty.Plot, UNRATE.Plot,
+                      ncol = 2, nrow = 2)
+ggpubr::annotate_figure(TS.Plots, top = 'Figure 1 - Time Series Plots: 1967-2019')
+```
+<br/><br/>
+
+Of course, stationarity cannot be concluded from simple visual inspection. I conduct formal stationarity testing using the Augmented Dickey-Fuller (ADF) test, as well as the Kwiatkowski-Phillips-Schmidt-Shin (KPSS) test. The ADF test has a null hypothesis of a unit root, while the KPSS test has a null hypothesis of stationarity. Using the two tests in conjunction provides a stronger affirmation of the result given by a single test, and lowers the probability of an incorrect conclusion on the basis of low power through the limited sample size of my dataset. The ADF test determines the presence of a unit root through estimating the following equation (Enders, 2015): \[\Delta y_t = \gamma y_{t-1} + \sum_{i = 2}^p\Delta \beta_i y_{t-i + 1} +   \epsilon_t\] The $\gamma$ term is the coefficient of interest; if $\gamma$ is not significantly different from 0, then we fail to reject the null of a unit root. The test can be extended to include a drift (intercept) and trend term as well, the former of which is included in the poverty and unemployment ADF tests, and both of which are included in the GDP per Capita and Gini Ratio tests. The KPSS test is derived from the following model: \[
+\delta y_t = \beta' D_t + \mu_t + \epsilon_t\]where $D_t$ contains a constant or a constant with a time trend, $\mu_t$ is a random walk, and $\epsilon_t \sim N(0, \sigma_\epsilon^2)$. As with the ADF specifications, the drift specification was selected for poverty and unemployment, whereas the trend specification was selected for GDP per Capita and the Gini ratio. The test results are shown below in Table 2 - note that $\tau_1$ denotes the coefficient of interest in the ADF test. 
+
+```{r Stationarity Results, echo = FALSE}
+knitr::kable(Stationary.Results, caption = 'Stationarity Testing Results')
+
+```
+Note that 'CV' references the 5% critical value for the given test, 'FD' denotes that the series has been first differenced, and 'T1/T2' refer to the first and second tests, with the relevant test parameters changed between them. All of the triangle variables are stationary after first differencing, and thus integrated of order 1. Note that after differencing, the test specifications were adjusted accordingly. The unemployment rate is stationary in levels, and is thus integrated of order 0; however, it is also stationary after first differencing. As this variable is an exogenous control and included on the basis of reducing potential bias, its interpretation in the system is unimportant, provided that it does not result in a spurious regression, which it will not. This is because unemployment is stationary in both levels and first differences.
+
+```{r First.Difference Plot}
+# First Difference Plot
+TS.Plots.FD <- ggpubr::ggarrange(GDP.FD.Plot, Gini.FD.Plot, Poverty.FD.Plot, UNRATE.FD.Plot,
+                      ncol = 2, nrow = 2)
+ggpubr::annotate_figure(TS.Plots.FD, top = 'Figure 2 - Time Series Plots: First Differences')
+```
+\hfill\break
+Figure 2 shows the triangle variables and the unemployment rate in first differences. Note that real GDP per capita is log differenced and the other variables are simply first differenced. The relationship between GDP per capita and the poverty is made more clear in Figure 2. Note that the largest annual increases in poverty directly correspond to the largest annual decreases in GDP per capita. This would appear to correspond with the poverty rate increasing during recessions, most visible in the early 1980s and around 2008, a function of the early 1980s recession and Great Recession respectively. A similar pattern exists between the first differenced poverty and unemployment where the two track each other closely, with relatively higher poverty rates in periods of high unemployment. 
+
+### Cointegration Testing
+
+
+The next step is to determine whether the triangle system is cointegrated. Cointegration is motivated by the threat of spurious regression, which arises when regressing non-stationary variables on one another. However, spurious regression does not arise when the nonstationary variables are cointegrated (Ruxanda & Botezatu, 2008). A pair or group of series are cointegrated if they have the same, or a common stochastic trend. This trend can be eliminated by creating a specific linear combination of the variables, such that the residuals are stationary (Enders, 361). In the bi-variate case, cointegration is tested for by employing a Dickey-Fuller test on the residuals, but this procedure does not extend to the multivariate case. For multivariate cointegration, the most commonly used procedure is the Johansen test  (Hjalmarsson & Osterholm, 2007). The Johansen procedure involves estimating a VAR of order $p$, written as: \[
+\Delta y_t = \mu + \Pi y_{t-1} + \sum_{i = 1}^{p-1} \Gamma _i \Delta y_{t-1} + \epsilon_t\]In this equation, $\Pi$ denotes the coefficient matrix. If the coefficient matrix has reduced rank $r < n$, then rank $r$ matrices $\alpha$ and $\beta$ exist such that $\Pi = \alpha \beta'$ and $\Pi = \beta' y_t$ is stationary, where $r$ is the number of cointegrating relationships. Johansen proposed two different tests predicated on these equations: the trace test, written as: $J_{trace} = -T \sum_{i = r + 1}^{n} ln(1 - \hat \lambda_i)$, and the eigenvalue test, written as: $J_{trace} = -T \sum_{i = r + 1}^{n} ln(1 - \hat \lambda_i)$. The trace test has a null hypothesis of $r$ cointegrating vectors against the alternative hypothesis of $n$ cointegrating vectors. The eigenvalue test shares the same null hypothesis, but has the alternative hypothesis of $r + 1$ cointegrating vectors (Hjalmarsson & Osterholm, 2007). As cointegration relates to nonstationary series, the test is run on the data in levels. As the unemployment rate is stationary, it cannot be cointegrated with the triangle variables. As such, I conduct the Johansen test on only the triangle variables. As the test is sensitive to the $p$ number of lags chosen, I choose $p = 1$ as this value optimizes AIC and BIC in the VAR specification. I fail to reject the null of $r = 0$ in both the trace test and the eigenvalue test. Therefore, the triangle variables are not cointegrated. Given the stationarity and cointegration testing results, the appropriate procedure is to use the VAR model on the first differenced triangle variables, rather than the vector error correction model. In the next section, I proceed with estimating the VAR system. 
+
+### Estimation
+
+I estimate several different model specifications of the triangle system in order to identify the best model. This procedure includes experimenting with various lag length specifications and incorporating the unemployment variable as exogenous, endogenous, and/or in first differences. Through this testing, I have determined that the best model has a lag order is $p = 1$, as this lag value optimizes AIC and BIC, with the second highest log-likelihood. In this specification, the unemployment variable is exogenous, in first differences. Spurious regression is not a concern because unemployment is stationary in both levels and first differences. The goodness of fit results are summarized below:
+```{r Goodness of Fit, echo = FALSE}
+knitr::kable(VAR.Specification, caption = 'VAR Specification Results')
+```
+
+The exogeneity assumption for unemployment is a relatively strong one in the context of the system. However, there is strong evidence pointing to unemployment being a significant determinant of poverty. Indeed, Hilary Hoynes, Marianne Page, and Ann Stevens conclude in their 2005 paper that 'median wage growth, rising inequality, and the evolution of unemployment explain poverty rates well' (Hoynes et al., 2005). Although the VAR system produces a regression equation for each of the three triangle variables, the equation of interest is the one containing the first differenced national poverty rate as the dependent variable. This equation is estimated to be: \[\Delta Poverty = 2.205 \Delta rGDP_1 - 4.215 \Delta Gini_1 + 0.438 \Delta Poverty_1 + 0.38 Unemployment_1 + \hat \epsilon_t\]In the above, subscripts denote the lag length. The full output table is below: 
+
+```{r Var Results Table}
+knitr::kable(VAR.Summary, caption = 'Estimation Summary')
+
+```
+#### Model Specification Testing
+\hfill\break
+The eigenvalues of the companion matrix are $0.65, 0.34$ and $0.05$, all below one in absolute value. As such, the system is stable, with all triangle variables stationary. In order to draw inference based on the estimated parameters of the model, the general assumption is that the error terms are white noise, with zero mean, constant variance, and no autocorrelation (Hatemi, 2003). As such, I test the residuals for these properties. I test the VAR residuals for serial correlation with the Breusch-Godfrey Test. The test works by regressing the model residuals on the model parameters, as well as lagged values of the residuals. The $\chi^2$ test statistic is formed by taking the $R^2$ from this auxiliary regression, and multiplying it by the sample size. The test outputs a P-value of 0.13, not significant at any level. Therefore, I fail to reject the null hypothesis of no serial correlation. I test the residuals for homoscedasticity using the ARCH test. The ARCH procedure involves regressing the squared model residuals on a constant and $q$ lagged values of the model variables. Similar to the Breusch-Godfrey test, the $\chi^2$ test statistic is formed by multiplying the sample size with the $R^2$ value from the auxiliary regression of the residuals. For $q = 1$ lags, the test produces a P-value of 0.7293, clearly not significant any level. Note that this result is robust to different choices of lag length. Therefore, I fail to reject the null hypothesis of homoscedastic residuals. These results suggest that inference on the estimation results is valid, as the tests provide evidence that the errors are white noise. 
+
+#### Estimation Results  
+\hfill\break
+Proceeding to the estimation results, I find that neither of the coefficients of $\Delta rGDP$ and $\Delta Gini$ are statistically significant. This result provides evidence against the triangle hypothesis. As stated previously, the triangle hypothesis states that the change in poverty is fully determined by the change in income growth and the change in income inequality. However, if neither the partial effects of the change in income growth, approximated by $\Delta rGDP$, and the change in income inequality, approximated by $\Delta Gini$, on the change in poverty are significantly different from 0, then they cannot determine the change in poverty. 
+
+### Granger Causality  
+
+To further assess the relationship within the triangle system, I employ the Granger causality test. Granger causality does not entail causality in the sense typically prescribed to the word 'causality'. Instead, Granger causality is a test of predictive causality - it tests whether current and past values of one variable, or a set of variables, are useful in forecasting the future values of another variable (Enders, 306). As such, the use of the word 'causality' is something of a misnomer. However, the test provides useful information regarding the relationship between a set of time series variables. In this case, if $\Delta rGDP$ and $\Delta Gini$ do not prove useful in forecasting $\Delta Poverty$, then there is little basis to suggest that they determine $\Delta Poverty$. Since all variables in the triangle system are stationary in the VAR specification I outlined above, whether $\Delta rGDP$ and $\Delta Gini$ Granger-cause $\Delta Poverty$ is determined using a standard F-Test (Enders, 306). This amounts to testing the restriction $\alpha_{12} = \alpha_{13} = 0$, where the $\alpha$ terms denote the coefficients of $\Delta rGDP$ and $\Delta Gini$, respectively. The test produces an F-statistic of $0.387$, not significant at any level. Therefore, I fail to reject the null hypothesis that $\Delta rGDP$ and $\Delta Gini$ do not Granger-cause $\Delta Poverty$. This test result indicates that $\Delta rGDP$ and $\Delta Gini$ are not useful in forecasting future values of $\Delta Poverty$, and aligns with the VAR results presented above.
+
+## Conclusion 
+
+In this paper, I have uses a vector autoregressive framework to test whether or not former World Bank Chief Economist Francois Bourguignon's Poverty-Growth-Inequality triangle hypothesis holds in the United States. The triangle hypothesis states that a nation's change in poverty can be determined by its change in income growth and income equality (Bourguignon, 3). Literature review suggests that economic growth and income inequality are relevant determinants of poverty, however much of the literature utilizes focuses on developing economies, using panel data methods. Using a VAR methodology, I cannot replicate the findings present in the literature. I find that the partial effects of $\Delta rGDP$ and $\Delta Gini$ on $\Delta Poverty$ are not significantly different from 0, and that $\Delta Gini$ and $\Delta rGDP$ do not Granger-cause $\Delta Poverty$. I therefore find no evidence to support the triangle hypothesis in the United States on the basis of these results. It is important to note that while these results fail to substantiate the triangle hypothesis, they do not disprove it either.  
+\hfill\break
+As referenced in the data section, there are discrepancies between Bourguignon's definitions of the triangle variables and the data that I utilized in this analysis. The triangle specifically references 'absolute poverty', and provides \$1 per day as an example of a poverty line by which the poverty rate is defined. Clearly, such a definition of poverty is at odds with poverty in the United States or any other developed economy, where such an extreme value is almost certainly not relevant. Bourguignon himself uses data from Mexico in his original paper, and Mexico has a far greater proportion of its population in extreme poverty relative to the United States. Therefore, it may be that developed economies are simply outside the scope the triangle was defined for. Additionally, I use log differenced real GDP per capita as a proxy for income growth, which once more differs from Bourguignon's stated definition of 'Growth'. He specifically defines growth as the 'percentage change in mean welfare level', and references income and consumption an example of this. Choosing a different growth variable such as median income may present different results. There is also the issue of small sample size, brought on through the Gini ratio only extending to 1967. Obtaining monthly or quarterly data on these variables would greatly increase the sample size, and perhaps lead to different conclusions than those found here. A final relevant point concerns the scale of the United States relative to many other countries in the world. The size and variation between different states, cities, and regions is such that aggregate results from the entire country may not necessarily describe the dynamics of a particular subset of the country. In addition to rectifying the issues I have laid out, future studies should attempt conducting this analysis at the regional, or state level. Doing so may further our understanding of how to best approach development within the United States. 
+
+
+## References
+
+Adams, R. (2003). Economic Growth, Inequality, and Poverty: Findings From a New Data Set. The World Bank Poverty Reduction Group, 1-22.
+
+Adefemi Alamu Obalade, A. E. (2019). VAR MODELLING OF DYNAMICS OF POVERTY, UNEMPLOYMENT, LITERACY AND PER CAPITA INCOME IN NIGERIA. Folia Oeconomica Stetinensia, 74-86.
+
+Bourguignon, F. (2004). The Poverty-Inequality-Growth Triangle. The World Bank, 1-24.
+
+Brian Ames, W. B. (2001). Macroeconomic Policy and Poverty Reduction. Washington, DC: International Monetary Fund & The World Bank.
+
+Enders, W. (2015). Applied Econometric Time Series. New York: Wiley.
+
+Erik Hjalmarsson, P. O. (2007). Testing for Cointegration Using the Johansen Methodology when Variables are Near-Integrated. International Monetary Fund, 3-15.
+
+Gheorghe Ruxanda, A. B. (2008). Spurious Regression And Cointegration. Numerical Example: Romania's M2 Money Demand. Institute for Economic Forecasting, 51-62.
+
+Hatemi-J, A. (2004). Multivariate tests for autocorrelation in the stable and unstable VAR models. Elsevier, 661-670.
+
+Hilary Hoynes, M. P. (2005). Poverty in America: Trends and Explanations. National Bureau of Economic Research, 47-68.
+
+Jaison R. Abel, R. D. (2019). Why Are Some Places So Much More Unequal Than Others. Federal Reserve Bank of New York: Economic Policy Review, 58-72.
+
+Michael Roemer, M. K. (1997). Does Economic Growth Reduce Poverty? Harvard Institute For International Development.
+
+Robert Breunig, O. M. (2020). Inequality, Poverty, and Economic Growth. International Economics, 83-99.
+
+
+
+
+
+
+
+
+
+
+
